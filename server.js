@@ -62,19 +62,59 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-// チャット（ペルソナとして返答）
+// チャット（ストリーミング）
 app.post("/api/chat", async (req, res) => {
   const { persona, messages } = req.body;
   if (!persona || !messages) {
     return res.status(400).json({ error: "persona と messages が必要です" });
   }
 
+  const ollamaMessages = [
+    { role: "system", content: buildSystemPrompt(persona) },
+    ...messages,
+  ];
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+
   try {
-    const reply = await callOllama(buildSystemPrompt(persona), messages);
-    res.json({ reply });
+    const ollamaRes = await fetch(OLLAMA_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: ollamaMessages,
+        stream: true,
+        options: { temperature: 0.8 },
+      }),
+    });
+
+    const reader = ollamaRes.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const lines = decoder.decode(value).split("\n").filter((l) => l.trim());
+      for (const line of lines) {
+        try {
+          const data = JSON.parse(line);
+          if (data.message?.content) {
+            res.write(`data: ${JSON.stringify({ token: data.message.content })}\n\n`);
+          }
+          if (data.done) {
+            res.write("data: [DONE]\n\n");
+          }
+        } catch {}
+      }
+    }
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: e.message });
+    res.write(`data: ${JSON.stringify({ error: e.message })}\n\n`);
+  } finally {
+    res.end();
   }
 });
 
@@ -82,25 +122,39 @@ app.post("/api/chat", async (req, res) => {
 app.post("/api/feedback", async (req, res) => {
   const { persona, messages } = req.body;
 
-  const feedbackPrompt = `あなたは営業トレーナーです。
-以下は、営業担当者（user）と介護事業所の施設長（assistant）の会話です。
-施設長のペルソナ: ${persona.name}（${persona.title}）、${persona.character}
+  const feedbackPrompt = `あなたはGLSの営業トレーナーです。
+GLSは介護事業所の「加算取りこぼし」を発見・申請支援して増収させるコンサルです。
+代表のたくきは元介護保険監査員（行政の検査側）という強みがあります。
+営業手法はSPIN＋Challenger Saleを基本とします。
 
-会話を分析して、以下の形式でフィードバックしてください（日本語で）:
+【顧客理解の前提】
+- 施設長は加算の存在を知っている。問題は「やる時間がない」こと
+- 管理者は現場と兼務で多忙。信頼を得るまでコンサルには強い不信感がある
+- 「コンサル＝高い・成果が出ない」という過去の傷がある事業所が多い
+- DXツール導入より「今すぐ現場の負担を減らす」ことへの関心が高い
+
+【SPIN営業の観点（評価基準）】
+- Situation: 相手の現状を正しく把握する質問ができているか
+- Problem: 顕在化していない課題を引き出せているか
+- Implication: その課題が放置されるとどうなるかを実感させているか
+- Need-payoff: GLSが解決できると相手が自ら気づくよう誘導できているか
+
+以下は練習会話です。
+施設長ペルソナ: ${persona.name}（${persona.title}）、${persona.character}
+
+この会話を厳しく分析して日本語でフィードバックしてください:
 
 ## 良かった点
-- （具体的に）
+- （具体的な発言を引用して）
 
-## 改善点
-- （具体的に）
+## 問題のあった点
+- （具体的な発言を引用して・なぜまずいか）
 
 ## 次回試してほしいアプローチ
-- （具体的に）
+- （具体的なセリフ例も交えて）
 
 ## 総評
-（2-3文で）
-
-厳しくかつ建設的に。表面的な褒め方はしない。`;
+（2〜3文。厳しく・建設的に。表面的な褒め方は不要）`;
 
   try {
     const feedback = await callOllama(feedbackPrompt, messages);
@@ -118,28 +172,34 @@ ${persona.facility}（${persona.facility_type}、${persona.size}、${persona.loc
 【あなたのキャラクター】
 ${persona.character}
 
-【あなたの悩み・課題】
+【あなたが抱えている悩み・課題】
 ${persona.pain_points.map((p) => `・${p}`).join("\n")}
 
-【懸念・不信感】
+【営業・コンサルへの懸念・不信感】
 ${persona.concerns.map((c) => `・${c}`).join("\n")}
 
 【話し方の特徴】
 ${persona.speaking_style}
 
-【本当の本音（表には出さない）】
+【本音（表には出さない）】
 ${persona.hidden_need}
+
+【状況設定】
+${persona.scenario ?? "突然、見知らぬ会社の営業担当者から連絡がきた。相手が何者で何をしに来たのかはまだ分からない。"}
 
 ---
 【ロールプレイのルール】
-- あなたはGLS（介護事業所の加算最適化コンサル）の営業担当者と話しています
-- 最初は警戒的・忙しそうな態度で接する。「うちは大丈夫です」「忙しいので」と言いがち
-- 相手が誠実で具体的な話をしてきたら、少しずつ心を開いていく
-- 抽象的な話や自社の売り込みばかりだと興味を失う
-- 具体的な数字（「月いくら増えるか」など）を出されると反応する
-- リアルな介護現場の言葉を使う
-- 返答は3〜5文程度。長々と話さない
-- 感情・警戒感・好奇心などを自然に表現する`;
+- あなたは「相手が何者で何の会社か」を最初は知らない。営業担当者が名乗って説明するまで待つ
+- 名乗りや会社説明がないまま話を進めようとする相手には「どちら様ですか？」と聞く
+- 最初は忙しさ・警戒感を出す。「今ちょっと手が離せなくて」「うちは大丈夫です」が口癖
+- 「コンサル」「支援」「提案」といった言葉には過去のトラブルを思い出して身構える
+- 相手が誠実で、自分の現場の悩みにピンポイントで触れてきたら少しだけ耳を傾ける
+- 抽象的な話・実績自慢・一方的な説明が続くと「また営業か」と心を閉じる
+- 具体的な数字（「月にいくら増える可能性がある」等）を出されると反応する
+- リアルな介護現場の言葉・感覚で話す（「加算」「実地指導」「記録」「シフト」等）
+- 返答は2〜4文程度。忙しい人間らしく短く。長々と話さない
+- 感情（疲弊感・警戒・ほんの少しの好奇心）を自然に表現する
+- ロールプレイであることは絶対に口にしない。あくまでリアルな施設長として振る舞う`;
 }
 
 const PORT = 3001;

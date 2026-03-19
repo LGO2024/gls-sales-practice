@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { Persona, Message } from "../types";
 import { useVoice } from "../hooks/useVoice";
+import SalesMemo from "./SalesMemo";
 
 interface Props {
   persona: Persona;
@@ -35,26 +36,52 @@ export default function ChatWindow({ persona, messages, setMessages, onEnd, onBa
     setInterimText("");
     setLoading(true);
 
+    // ストリーミング受信
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ persona, messages: newMessages }),
       });
-      const data = await res.json();
-      if (data.reply) {
-        const reply = data.reply as string;
-        setMessages([...newMessages, { role: "assistant", content: reply }]);
-        // 音声モードなら自動読み上げ
-        if (voiceMode) {
-          speak(reply);
+
+      if (!res.body) throw new Error("ストリーム非対応");
+
+      // 空のassistantメッセージを先に追加して、トークンを追記していく
+      setMessages([...newMessages, { role: "assistant", content: "" }]);
+      setLoading(false);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let reply = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const lines = decoder.decode(value).split("\n").filter((l) => l.startsWith("data: "));
+        for (const line of lines) {
+          const raw = line.slice(6);
+          if (raw === "[DONE]") continue;
+          try {
+            const { token, error } = JSON.parse(raw);
+            if (error) { alert("エラー: " + error); break; }
+            if (token) {
+              reply += token;
+              setMessages((prev) => {
+                const updated = [...prev];
+                updated[updated.length - 1] = { role: "assistant", content: reply };
+                return updated;
+              });
+            }
+          } catch {}
         }
-      } else {
-        alert("エラー: " + (data.error ?? "不明なエラー"));
       }
+
+      // 音声モードなら完成したテキストを読み上げ
+      if (voiceMode && reply) speak(reply);
+
     } catch {
       alert("サーバーに接続できませんでした。");
-    } finally {
       setLoading(false);
     }
   }, [loading, messages, persona, setMessages, voiceMode, speak]);
@@ -64,22 +91,22 @@ export default function ChatWindow({ persona, messages, setMessages, onEnd, onBa
   // ──────────────────────────────────────────
   const handleMicPress = () => {
     if (listening) {
-      stopListening();
+      // もう一度押したら停止して送信
+      const finalText = stopListening();
+      setInterimText("");
+      if (finalText.trim()) sendMessage(finalText);
       return;
     }
-    stopSpeaking(); // 読み上げ中なら止める
 
-    let latestText = "";
+    stopSpeaking();
+    setInterimText("");
+
     startListening(
-      (text) => {
-        latestText = text;
-        setInterimText(text); // リアルタイム表示
-      },
-      () => {
+      (text) => setInterimText(text), // リアルタイム表示
+      (finalText) => {
+        // continuous:true の場合ここは手動stop後のみ呼ばれる
         setInterimText("");
-        if (latestText.trim()) {
-          sendMessage(latestText);
-        }
+        if (finalText.trim()) sendMessage(finalText);
       }
     );
   };
@@ -93,7 +120,7 @@ export default function ChatWindow({ persona, messages, setMessages, onEnd, onBa
 
   // マイクボタンの色
   const micBg = listening ? "#ef4444" : speaking ? "#f97316" : "#1a1a1a";
-  const micLabel = listening ? "認識中..." : speaking ? "読み上げ中" : "話す";
+  const micLabel = listening ? "もう一度押すと送信" : speaking ? "読み上げ中" : "押して話す";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
@@ -279,6 +306,9 @@ export default function ChatWindow({ persona, messages, setMessages, onEnd, onBa
         )}
         <div ref={bottomRef} />
       </div>
+
+      {/* ──── 営業メモ ──── */}
+      <SalesMemo persona={persona} />
 
       {/* ──── 入力エリア ──── */}
       <div style={{

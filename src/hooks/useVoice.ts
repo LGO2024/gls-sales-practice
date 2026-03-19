@@ -1,13 +1,11 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
-type SpeechRecognitionType = typeof window extends { SpeechRecognition: infer T } ? T : never;
-
 export interface UseVoiceReturn {
   supported: boolean;
   listening: boolean;
   speaking: boolean;
-  startListening: (onResult: (text: string) => void, onEnd: () => void) => void;
-  stopListening: () => void;
+  startListening: (onInterim: (text: string) => void, onStop: (finalText: string) => void) => void;
+  stopListening: () => string;
   speak: (text: string, onEnd?: () => void) => void;
   stopSpeaking: () => void;
 }
@@ -15,14 +13,12 @@ export interface UseVoiceReturn {
 export function useVoice(): UseVoiceReturn {
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
-  const recognitionRef = useRef<InstanceType<SpeechRecognitionType> | null>(null);
-  const interimRef = useRef<string>("");
+  const recognitionRef = useRef<any>(null);
+  const accumulatedRef = useRef<string>(""); // 確定済みテキストを蓄積
 
-  const SpeechRecognition =
-    (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+  const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
   const supported = !!SpeechRecognition && !!window.speechSynthesis;
 
-  // クリーンアップ
   useEffect(() => {
     return () => {
       recognitionRef.current?.abort();
@@ -31,47 +27,46 @@ export function useVoice(): UseVoiceReturn {
   }, []);
 
   const startListening = useCallback(
-    (onResult: (text: string) => void, onEnd: () => void) => {
+    (onInterim: (text: string) => void, onStop: (finalText: string) => void) => {
       if (!SpeechRecognition) return;
 
-      // 読み上げ中は止める
       window.speechSynthesis.cancel();
       setSpeaking(false);
+      accumulatedRef.current = "";
 
       const recognition = new SpeechRecognition();
       recognition.lang = "ja-JP";
-      recognition.continuous = false;
+      recognition.continuous = true;      // ← 詰まっても閉じない
       recognition.interimResults = true;
-
-      interimRef.current = "";
 
       recognition.onstart = () => setListening(true);
 
       recognition.onresult = (event: any) => {
         let interim = "";
-        let final = "";
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const transcript = event.results[i][0].transcript;
           if (event.results[i].isFinal) {
-            final += transcript;
+            accumulatedRef.current += transcript;
           } else {
-            interim += transcript;
+            interim = transcript;
           }
         }
-        // リアルタイムで仮テキストを渡す（表示用）
-        onResult(final || interim);
-        if (final) interimRef.current = final;
+        // リアルタイム表示：確定済み + 認識中
+        onInterim(accumulatedRef.current + interim);
       };
 
+      // continuous:true の場合、onend はstop()呼び出し後のみ発火
       recognition.onend = () => {
         setListening(false);
-        onEnd();
+        onStop(accumulatedRef.current);
       };
 
       recognition.onerror = (event: any) => {
+        // no-speech は無視（沈黙しただけなので継続）
+        if (event.error === "no-speech") return;
         console.error("音声認識エラー:", event.error);
         setListening(false);
-        onEnd();
+        onStop(accumulatedRef.current);
       };
 
       recognitionRef.current = recognition;
@@ -80,22 +75,21 @@ export function useVoice(): UseVoiceReturn {
     [SpeechRecognition]
   );
 
-  const stopListening = useCallback(() => {
+  // 停止して確定テキストを返す
+  const stopListening = useCallback((): string => {
     recognitionRef.current?.stop();
     setListening(false);
+    return accumulatedRef.current;
   }, []);
 
   const speak = useCallback((text: string, onEnd?: () => void) => {
     if (!window.speechSynthesis) return;
-
     window.speechSynthesis.cancel();
 
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "ja-JP";
     utterance.rate = 1.05;
-    utterance.pitch = 1.0;
 
-    // 日本語音声を優先選択
     const voices = window.speechSynthesis.getVoices();
     const jaVoice =
       voices.find((v) => v.lang === "ja-JP" && v.name.includes("Google")) ||
@@ -104,14 +98,8 @@ export function useVoice(): UseVoiceReturn {
     if (jaVoice) utterance.voice = jaVoice;
 
     utterance.onstart = () => setSpeaking(true);
-    utterance.onend = () => {
-      setSpeaking(false);
-      onEnd?.();
-    };
-    utterance.onerror = () => {
-      setSpeaking(false);
-      onEnd?.();
-    };
+    utterance.onend = () => { setSpeaking(false); onEnd?.(); };
+    utterance.onerror = () => { setSpeaking(false); onEnd?.(); };
 
     window.speechSynthesis.speak(utterance);
   }, []);
