@@ -112,10 +112,8 @@ export default function ChatWindow({ persona, messages, setMessages, onEnd, onBa
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage(input);
-    }
+    // Enterキーは送信しない（IME変換でも誤送信しないよう）
+    void e;
   };
 
   // マイクボタンの色
@@ -366,9 +364,7 @@ export default function ChatWindow({ persona, messages, setMessages, onEnd, onBa
               <input
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") { sendMessage(input); }
-                }}
+                onKeyDown={() => {}}
                 placeholder="テキストで補足入力も可"
                 disabled={loading || listening}
                 style={{
@@ -405,7 +401,7 @@ export default function ChatWindow({ persona, messages, setMessages, onEnd, onBa
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="営業トークを入力… (Enter で送信、Shift+Enter で改行)"
+              placeholder="営業トークを入力… (送信ボタンで送信)"
               disabled={loading}
               rows={3}
               style={{
