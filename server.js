@@ -158,7 +158,7 @@ ${persona.scenario ?? "突然、見知らぬ会社の営業担当者から連絡
 const distPath = join(__dirname, "dist");
 if (existsSync(distPath)) {
   app.use(express.static(distPath));
-  app.get("/*", (req, res) => {
+  app.use((req, res) => {
     res.sendFile(join(distPath, "index.html"));
   });
 }
